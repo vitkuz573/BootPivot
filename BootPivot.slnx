@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BootPivot.Cli/BootPivot.Cli.csproj" />
+    <Project Path="src/BootPivot.Core/BootPivot.Core.csproj" />
+    <Project Path="src/BootPivot.Windows/BootPivot.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BootPivot.Core.Tests/BootPivot.Core.Tests.csproj" />
+  </Folder>
+</Solution>
