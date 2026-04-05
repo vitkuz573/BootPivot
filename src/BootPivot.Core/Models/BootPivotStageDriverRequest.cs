@@ -8,4 +8,8 @@ public sealed record BootPivotStageDriverRequest(
     string Label,
     string LoaderScriptContent,
     string? LoaderCommand,
+    string? SystemPartition,
+    string? BootSdiPath,
+    string? WinloadPath,
+    IReadOnlyList<BootPivotWimImageInfo> Images,
     bool DryRun);

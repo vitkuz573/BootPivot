@@ -7,4 +7,7 @@ public sealed record BootPivotStageOptions(
     string? SessionId = null,
     string? WorkingRoot = null,
     string? LoaderCommand = null,
+    string? SystemPartition = null,
+    string? BootSdiPath = null,
+    string? WinloadPath = null,
     bool DryRun = false);

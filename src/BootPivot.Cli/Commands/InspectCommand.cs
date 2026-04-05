@@ -39,6 +39,10 @@ public sealed class InspectCommand
                 Console.WriteLine($"Supported: {(inspectResult.IsSupported ? "yes" : "no")}");
                 Console.WriteLine($"Elevated: {(inspectResult.IsElevated ? "yes" : "no")}");
                 Console.WriteLine($"BCD edit available: {(inspectResult.BcdEditAvailable ? "yes" : "no")}");
+                Console.WriteLine($"DISM available: {(inspectResult.DismAvailable ? "yes" : "no")}");
+                Console.WriteLine($"Boot.sdi available: {(inspectResult.BootSdiAvailable ? "yes" : "no")}");
+                Console.WriteLine($"Boot.sdi path: {inspectResult.BootSdiPath}");
+                Console.WriteLine($"Recommended winload path: {inspectResult.RecommendedWinloadPath}");
                 Console.WriteLine($"Working root: {inspectResult.WorkingRoot}");
 
                 if (inspectResult.Diagnostics.Count > 0)

@@ -17,6 +17,7 @@ public static class CliApp
         services.AddBootPivotWindows();
 
         services.AddSingleton<InspectCommand>();
+        services.AddSingleton<ImageInfoCommand>();
         services.AddSingleton<StageCommand>();
         services.AddSingleton<PivotCommand>();
         services.AddSingleton<CleanupCommand>();
@@ -30,6 +31,7 @@ public static class CliApp
 
         var rootCommand = new RootCommand("BootPivot CLI");
         rootCommand.Add(serviceProvider.GetRequiredService<InspectCommand>().Build());
+        rootCommand.Add(serviceProvider.GetRequiredService<ImageInfoCommand>().Build());
         rootCommand.Add(serviceProvider.GetRequiredService<StageCommand>().Build());
         rootCommand.Add(serviceProvider.GetRequiredService<PivotCommand>().Build());
         rootCommand.Add(serviceProvider.GetRequiredService<CleanupCommand>().Build());

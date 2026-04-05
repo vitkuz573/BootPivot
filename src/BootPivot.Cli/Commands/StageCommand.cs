@@ -46,6 +46,18 @@ public sealed class StageCommand
         {
             Description = "Optional command injected into the loader script."
         };
+        var systemPartitionOption = new Option<string?>("--system-partition")
+        {
+            Description = "System partition containing boot.sdi (for example C:)."
+        };
+        var bootSdiPathOption = new Option<string?>("--boot-sdi")
+        {
+            Description = "Path to boot.sdi on the system partition (for example \\boot\\boot.sdi)."
+        };
+        var winloadPathOption = new Option<string?>("--winload")
+        {
+            Description = "Winload path inside the image (for example \\Windows\\System32\\winload.efi)."
+        };
         var dryRunOption = new Option<bool>("--dry-run")
         {
             Description = "Preview only. Do not write files."
@@ -61,19 +73,25 @@ public sealed class StageCommand
         command.Add(sessionOption);
         command.Add(workingRootOption);
         command.Add(loaderCommandOption);
+        command.Add(systemPartitionOption);
+        command.Add(bootSdiPathOption);
+        command.Add(winloadPathOption);
         command.Add(dryRunOption);
         command.Add(jsonOption);
 
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var options = new BootPivotStageOptions(
-                parseResult.GetValue(imageOption)!,
-                parseResult.GetValue(indexOption),
-                parseResult.GetValue(labelOption)!,
-                parseResult.GetValue(sessionOption),
-                parseResult.GetValue(workingRootOption),
-                parseResult.GetValue(loaderCommandOption),
-                parseResult.GetValue(dryRunOption));
+                ImagePath: parseResult.GetValue(imageOption)!,
+                ImageIndex: parseResult.GetValue(indexOption),
+                Label: parseResult.GetValue(labelOption)!,
+                SessionId: parseResult.GetValue(sessionOption),
+                WorkingRoot: parseResult.GetValue(workingRootOption),
+                LoaderCommand: parseResult.GetValue(loaderCommandOption),
+                SystemPartition: parseResult.GetValue(systemPartitionOption),
+                BootSdiPath: parseResult.GetValue(bootSdiPathOption),
+                WinloadPath: parseResult.GetValue(winloadPathOption),
+                DryRun: parseResult.GetValue(dryRunOption));
 
             var result = await service.StageAsync(options, cancellationToken);
             var json = parseResult.GetValue(jsonOption);
@@ -92,6 +110,9 @@ public sealed class StageCommand
                     Console.WriteLine($"Index: {result.Manifest.ImageIndex}");
                     Console.WriteLine($"Label: {result.Manifest.Label}");
                     Console.WriteLine($"Loader script: {result.Manifest.LoaderScriptPath}");
+                    Console.WriteLine($"System partition: {result.Manifest.SystemPartition ?? "n/a"}");
+                    Console.WriteLine($"Boot.sdi path: {result.Manifest.BootSdiPath ?? "n/a"}");
+                    Console.WriteLine($"Winload path: {result.Manifest.WinloadPath ?? "n/a"}");
                 }
 
                 if (result.PlannedCommands.Count > 0)

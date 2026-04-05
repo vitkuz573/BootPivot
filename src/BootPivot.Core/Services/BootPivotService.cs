@@ -26,18 +26,50 @@ public sealed class BootPivotService : IBootPivotService
         return driver.InspectAsync(workingRoot, cancellationToken);
     }
 
-    public Task<BootPivotStageResult> StageAsync(BootPivotStageOptions options, CancellationToken cancellationToken)
+    public async Task<BootPivotImageInfoResult> GetImageInfoAsync(string imagePath, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(imagePath))
+        {
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.ValidationError,
+                "Image path is required.",
+                string.Empty,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                Array.Empty<string>());
+        }
+
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(imagePath.Trim());
+        }
+        catch (Exception ex)
+        {
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.ValidationError,
+                $"Image path is invalid. {ex.Message}",
+                imagePath,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                Array.Empty<string>());
+        }
+
+        return await driver.GetImageInfoAsync(fullPath, cancellationToken);
+    }
+
+    public async Task<BootPivotStageResult> StageAsync(BootPivotStageOptions options, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
 
         if (string.IsNullOrWhiteSpace(options.ImagePath))
         {
-            return Task.FromResult(ValidationStageFailure("Image path is required."));
+            return ValidationStageFailure("Image path is required.");
         }
 
         if (options.ImageIndex <= 0)
         {
-            return Task.FromResult(ValidationStageFailure("Image index must be greater than 0."));
+            return ValidationStageFailure("Image index must be greater than 0.");
         }
 
         var label = string.IsNullOrWhiteSpace(options.Label)
@@ -46,7 +78,7 @@ public sealed class BootPivotService : IBootPivotService
 
         if (label.Length > MaxLabelLength)
         {
-            return Task.FromResult(ValidationStageFailure($"Label is too long. Maximum length is {MaxLabelLength}."));
+            return ValidationStageFailure($"Label is too long. Maximum length is {MaxLabelLength}.");
         }
 
         var sessionId = string.IsNullOrWhiteSpace(options.SessionId)
@@ -55,13 +87,39 @@ public sealed class BootPivotService : IBootPivotService
 
         if (!SessionIdRegex.IsMatch(sessionId))
         {
-            return Task.FromResult(ValidationStageFailure(
-                "Session id must match ^[a-zA-Z0-9_-]{3,64}$."));
+            return ValidationStageFailure("Session id must match ^[a-zA-Z0-9_-]{3,64}$.");
+        }
+
+        string imagePath;
+        try
+        {
+            imagePath = Path.GetFullPath(options.ImagePath.Trim());
+        }
+        catch (Exception ex)
+        {
+            return ValidationStageFailure($"Image path is invalid. {ex.Message}");
+        }
+
+        var imageInfo = await driver.GetImageInfoAsync(imagePath, cancellationToken);
+        if (imageInfo.Status != BootPivotStatus.Success)
+        {
+            return new BootPivotStageResult(
+                imageInfo.Status,
+                $"Image validation failed. {imageInfo.Message}",
+                null,
+                Array.Empty<string>());
+        }
+
+        if (imageInfo.IndexValidationAvailable
+            && imageInfo.Images.Count > 0
+            && imageInfo.Images.All(image => image.Index != options.ImageIndex))
+        {
+            var availableIndexes = string.Join(", ", imageInfo.Images.Select(static image => image.Index).OrderBy(static i => i));
+            return ValidationStageFailure(
+                $"Image index {options.ImageIndex} was not found in '{imagePath}'. Available indexes: {availableIndexes}.");
         }
 
         var workingRoot = ResolveWorkingRoot(options.WorkingRoot);
-        var imagePath = Path.GetFullPath(options.ImagePath.Trim());
-
         var loaderScript = BootPivotLoaderTemplateRenderer.Render(
             BootPivotLoaderTemplate.Default,
             imagePath,
@@ -77,9 +135,13 @@ public sealed class BootPivotService : IBootPivotService
             label,
             loaderScript,
             options.LoaderCommand,
+            options.SystemPartition,
+            options.BootSdiPath,
+            options.WinloadPath,
+            imageInfo.Images,
             options.DryRun);
 
-        return driver.StageAsync(request, cancellationToken);
+        return await driver.StageAsync(request, cancellationToken);
     }
 
     public Task<BootPivotPivotResult> PivotAsync(BootPivotPivotOptions options, CancellationToken cancellationToken)

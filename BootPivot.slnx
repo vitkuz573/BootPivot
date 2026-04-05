@@ -6,5 +6,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/BootPivot.Core.Tests/BootPivot.Core.Tests.csproj" />
+    <Project Path="tests/BootPivot.Windows.Tests/BootPivot.Windows.Tests.csproj" />
   </Folder>
 </Solution>

@@ -1,38 +1,41 @@
 # BootPivot
 
-BootPivot is a Windows-focused CLI for staging and switching the next boot entry to a selected WIM image.
+BootPivot is a standalone Windows CLI for staging and switching the next boot entry to a selected WIM image.
 
-## What It Does
+## Capabilities
 
-- Validates host readiness for boot entry operations.
-- Creates isolated staging sessions for WIM boot workflows.
-- Builds and previews BCD command plans before applying changes.
-- Applies boot sequence changes for the next restart.
-- Cleans up stale or specific staging sessions.
+- Validates host readiness (`bcdedit`, `dism`, `boot.sdi`, elevation).
+- Reads WIM indexes and metadata through DISM.
+- Creates isolated staging sessions with manifest + loader script.
+- Builds exact BCD command plans before execution.
+- Applies one-shot boot sequence changes (`/bootsequence`) for next restart.
+- Cleans stale or specific staged sessions.
 
 ## Project Layout
 
 - `src/BootPivot.Core`
-  - Domain models, contracts, validation, session orchestration.
+  - Domain models, validation, orchestration service, templates.
 - `src/BootPivot.Windows`
-  - Windows driver implementation (`bcdedit`, elevation checks, process execution).
+  - Windows driver implementation and process execution.
 - `src/BootPivot.Cli`
-  - Command-line host on `System.CommandLine`, DI wiring, exit code mapping.
+  - `System.CommandLine` host, command handlers, DI wiring.
 - `tests/BootPivot.Core.Tests`
-  - Unit tests for template rendering and orchestration rules.
+  - Core orchestration/template unit tests.
+- `tests/BootPivot.Windows.Tests`
+  - Windows parsing/infrastructure unit tests.
 
 ## Commands
 
 - `inspect`
-  - Checks platform support, elevation state, and required tooling.
-- `stage`
-  - Creates a session and renders loader script/template with placeholders.
-  - Supports `--dry-run` for preview-only output.
-- `pivot`
-  - Previews or applies BCD changes for a staged session.
-  - Use `--apply` to execute and optional `--reboot` for immediate restart.
-- `cleanup`
-  - Removes a specific session or sessions older than a threshold.
+  - Prints environment diagnostics and recommended defaults.
+- `image-info --image <path>`
+  - Reads available WIM indexes and image metadata.
+- `stage --image <path> [--index N] [--label <text>] [--session <id>] [--work-dir <path>] [--loader-command <cmd>] [--system-partition C:] [--boot-sdi \\boot\\boot.sdi] [--winload \\Windows\\System32\\winload.efi] [--dry-run]`
+  - Creates a stage session and BCD command plan.
+- `pivot --session <id> [--work-dir <path>] [--apply] [--reboot]`
+  - Previews or executes BCD changes for the staged session.
+- `cleanup [--session <id>] [--work-dir <path>] [--older-than-days N] [--dry-run]`
+  - Removes selected staged sessions.
 
 ## Build And Test
 
@@ -44,4 +47,5 @@ dotnet test BootPivot.slnx -c Release
 
 ## Safety Defaults
 
-- `pivot` runs in preview mode unless `--apply` is explicitly provided.
+- `pivot` is preview-only unless `--apply` is explicitly set.
+- `stage` and `cleanup` support `--dry-run` previews.

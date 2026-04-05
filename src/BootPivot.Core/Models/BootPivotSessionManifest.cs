@@ -9,4 +9,8 @@ public sealed record BootPivotSessionManifest(
     string? LoaderCommand,
     string? BootEntryId,
     DateTimeOffset CreatedUtc,
-    DateTimeOffset? LastPivotedUtc);
+    DateTimeOffset? LastPivotedUtc,
+    string? SystemPartition = null,
+    string? BootSdiPath = null,
+    string? WinloadPath = null,
+    IReadOnlyList<BootPivotWimImageInfo>? Images = null);

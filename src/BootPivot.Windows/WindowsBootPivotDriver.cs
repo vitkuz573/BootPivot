@@ -11,6 +11,10 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
 {
     private const string ManifestFileName = "manifest.json";
     private const string LoaderScriptFileName = "loader.cmd";
+    private const string DefaultBootSdiPath = "\\boot\\boot.sdi";
+    private const string DefaultWinloadEfiPath = "\\Windows\\System32\\winload.efi";
+    private const string DefaultWinloadExePath = "\\Windows\\System32\\winload.exe";
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
@@ -28,45 +32,188 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
         this.processExecutor = processExecutor;
     }
 
-    public Task<BootPivotInspectResult> InspectAsync(string workingRoot, CancellationToken cancellationToken)
+    public async Task<BootPivotInspectResult> InspectAsync(string workingRoot, CancellationToken cancellationToken)
     {
-        _ = cancellationToken;
+        ArgumentException.ThrowIfNullOrWhiteSpace(workingRoot);
 
+        var resolvedWorkingRoot = Path.GetFullPath(workingRoot);
         var platform = RuntimeInformation.OSDescription;
         var isWindows = OperatingSystem.IsWindows();
         var bcdEditAvailable = IsExecutableAvailable("bcdedit.exe");
         var reagentcAvailable = IsExecutableAvailable("reagentc.exe");
+        var dismAvailable = IsExecutableAvailable("dism.exe");
         var isElevated = isWindows && IsProcessElevated();
+
+        var systemPartition = ResolveSystemPartition(null);
+        var bootSdiPath = DefaultBootSdiPath;
+        var bootSdiFullPath = BuildAbsolutePath(systemPartition, bootSdiPath);
+        var bootSdiAvailable = isWindows && File.Exists(bootSdiFullPath);
+
+        var recommendedWinloadPath = await ResolveRecommendedWinloadPathAsync(cancellationToken);
 
         var diagnostics = new List<string>
         {
-            $"working-root: {workingRoot}",
+            $"working-root: {resolvedWorkingRoot}",
             $"platform: {platform}",
             $"bcdedit: {(bcdEditAvailable ? "available" : "missing")}",
+            $"dism: {(dismAvailable ? "available" : "missing")}",
             $"reagentc: {(reagentcAvailable ? "available" : "missing")}",
-            $"elevated: {(isElevated ? "yes" : "no")}"
+            $"elevated: {(isElevated ? "yes" : "no")}",
+            $"system-partition: {systemPartition}",
+            $"boot.sdi: {(bootSdiAvailable ? "available" : "missing")}",
+            $"boot.sdi-path: {bootSdiFullPath}",
+            $"recommended-winload-path: {recommendedWinloadPath}"
         };
 
-        var isSupported = isWindows && bcdEditAvailable;
+        var isSupported = isWindows && bcdEditAvailable && dismAvailable && bootSdiAvailable;
         var status = isSupported ? BootPivotStatus.Success : BootPivotStatus.NotSupported;
         var message = isSupported
             ? "BootPivot environment is ready."
-            : "BootPivot pivot operations require Windows with bcdedit available.";
+            : "BootPivot requires Windows, bcdedit, dism, and an accessible boot.sdi.";
 
-        return Task.FromResult(new BootPivotInspectResult(
+        return new BootPivotInspectResult(
             status,
             message,
             platform,
             isSupported,
             isElevated,
             bcdEditAvailable,
-            workingRoot,
-            diagnostics));
+            dismAvailable,
+            bootSdiAvailable,
+            bootSdiFullPath,
+            recommendedWinloadPath,
+            resolvedWorkingRoot,
+            diagnostics);
+    }
+
+    public async Task<BootPivotImageInfoResult> GetImageInfoAsync(string imagePath, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(imagePath))
+        {
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.ValidationError,
+                "Image path is required.",
+                string.Empty,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                Array.Empty<string>());
+        }
+
+        string fullPath;
+        try
+        {
+            fullPath = Path.GetFullPath(imagePath.Trim());
+        }
+        catch (Exception ex)
+        {
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.ValidationError,
+                $"Image path is invalid. {ex.Message}",
+                imagePath,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                Array.Empty<string>());
+        }
+
+        var diagnostics = new List<string>
+        {
+            $"image-path: {fullPath}"
+        };
+
+        if (!File.Exists(fullPath))
+        {
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.NotFound,
+                $"Image file was not found: {fullPath}",
+                fullPath,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                diagnostics);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.NotSupported,
+                "WIM metadata inspection is supported only on Windows.",
+                fullPath,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                diagnostics);
+        }
+
+        if (!IsExecutableAvailable("dism.exe"))
+        {
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.NotSupported,
+                "dism.exe is not available in PATH.",
+                fullPath,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                diagnostics);
+        }
+
+        var command = new CommandSpec("dism", ["/English", "/Get-WimInfo", $"/WimFile:{fullPath}"]);
+        var execution = await processExecutor.ExecuteAsync(command.FileName, command.Arguments, cancellationToken);
+
+        diagnostics.Add($"command: {FormatCommand(command)}");
+        diagnostics.Add($"exit-code: {execution.ExitCode}");
+
+        if (execution.ExitCode != 0)
+        {
+            diagnostics.AddRange(execution.StandardError.Take(3).Select(static line => $"stderr: {line}"));
+            diagnostics.AddRange(execution.StandardOutput.Take(3).Select(static line => $"stdout: {line}"));
+
+            return new BootPivotImageInfoResult(
+                BootPivotStatus.Failed,
+                "DISM failed to inspect the image. See diagnostics for details.",
+                fullPath,
+                false,
+                Array.Empty<BootPivotWimImageInfo>(),
+                diagnostics);
+        }
+
+        var parserInput = execution.StandardOutput.Concat(execution.StandardError).ToArray();
+        var parsedImages = DismWimInfoParser.Parse(parserInput);
+        var indexValidationAvailable = parsedImages.Count > 0;
+        var message = indexValidationAvailable
+            ? $"Detected {parsedImages.Count} image index(es)."
+            : "Image metadata query succeeded, but image indexes were not detected.";
+
+        return new BootPivotImageInfoResult(
+            BootPivotStatus.Success,
+            message,
+            fullPath,
+            indexValidationAvailable,
+            parsedImages,
+            diagnostics);
     }
 
     public async Task<BootPivotStageResult> StageAsync(BootPivotStageDriverRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
+
+        if (!TryResolveSystemPartition(request.SystemPartition, out var systemPartition, out var systemPartitionError))
+        {
+            return BuildStageValidationFailure(systemPartitionError);
+        }
+
+        if (!TryResolveBootSdiPath(request.BootSdiPath, systemPartition, out var bootSdiPath, out var bootSdiFullPath, out var bootSdiError))
+        {
+            return BuildStageValidationFailure(bootSdiError);
+        }
+
+        if (OperatingSystem.IsWindows() && !File.Exists(bootSdiFullPath))
+        {
+            return BuildStageValidationFailure($"boot.sdi was not found at '{bootSdiFullPath}'.");
+        }
+
+        if (!TryResolveRequestedWinloadPath(request.WinloadPath, out var requestedWinloadPath, out var winloadPathError))
+        {
+            return BuildStageValidationFailure(winloadPathError);
+        }
+
+        var winloadPath = await ResolveWinloadPathAsync(requestedWinloadPath, cancellationToken);
 
         var sessionDirectory = BuildSessionDirectory(request.WorkingRoot, request.SessionId);
         var loaderPath = Path.Combine(sessionDirectory, LoaderScriptFileName);
@@ -80,7 +227,11 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
             request.LoaderCommand,
             null,
             DateTimeOffset.UtcNow,
-            null);
+            null,
+            systemPartition,
+            bootSdiPath,
+            winloadPath,
+            request.Images);
 
         if (!TryBuildRamdiskDevice(request.ImagePath, out var ramdiskDevice, out var ramdiskError))
         {
@@ -91,7 +242,14 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
                 Array.Empty<string>());
         }
 
-        var plannedCommands = BuildPlannedPivotCommands(request.Label, ramdiskDevice, "<new_entry_guid>", reboot: false);
+        var plannedCommands = BuildPlannedPivotCommands(
+            request.Label,
+            ramdiskDevice,
+            "<new_entry_guid>",
+            systemPartition,
+            bootSdiPath,
+            winloadPath,
+            reboot: false);
 
         if (request.DryRun)
         {
@@ -166,6 +324,44 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
                 Array.Empty<string>());
         }
 
+        if (!TryResolveSystemPartition(manifest.SystemPartition, out var systemPartition, out var systemPartitionError))
+        {
+            return new BootPivotPivotResult(
+                BootPivotStatus.ValidationError,
+                systemPartitionError,
+                null,
+                Array.Empty<string>());
+        }
+
+        if (!TryResolveBootSdiPath(manifest.BootSdiPath, systemPartition, out var bootSdiPath, out var bootSdiFullPath, out var bootSdiError))
+        {
+            return new BootPivotPivotResult(
+                BootPivotStatus.ValidationError,
+                bootSdiError,
+                null,
+                Array.Empty<string>());
+        }
+
+        if (request.ApplyChanges && OperatingSystem.IsWindows() && !File.Exists(bootSdiFullPath))
+        {
+            return new BootPivotPivotResult(
+                BootPivotStatus.ValidationError,
+                $"boot.sdi was not found at '{bootSdiFullPath}'.",
+                null,
+                Array.Empty<string>());
+        }
+
+        if (!TryResolveRequestedWinloadPath(manifest.WinloadPath, out var requestedWinloadPath, out var winloadPathError))
+        {
+            return new BootPivotPivotResult(
+                BootPivotStatus.ValidationError,
+                winloadPathError,
+                null,
+                Array.Empty<string>());
+        }
+
+        var winloadPath = await ResolveWinloadPathAsync(requestedWinloadPath, cancellationToken);
+
         if (!TryBuildRamdiskDevice(manifest.ImagePath, out var ramdiskDevice, out var ramdiskError))
         {
             return new BootPivotPivotResult(
@@ -175,7 +371,15 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
                 Array.Empty<string>());
         }
 
-        var previewCommands = BuildPlannedPivotCommands(manifest.Label, ramdiskDevice, "<new_entry_guid>", request.Reboot);
+        var previewCommands = BuildPlannedPivotCommands(
+            manifest.Label,
+            ramdiskDevice,
+            "<new_entry_guid>",
+            systemPartition,
+            bootSdiPath,
+            winloadPath,
+            request.Reboot);
+
         if (!request.ApplyChanges)
         {
             return new BootPivotPivotResult(
@@ -232,7 +436,14 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
                 executedCommands);
         }
 
-        var remainingCommands = BuildPivotCommandSpecs(bootEntryId, ramdiskDevice, request.Reboot);
+        var remainingCommands = BuildPivotCommandSpecs(
+            bootEntryId,
+            ramdiskDevice,
+            systemPartition,
+            bootSdiPath,
+            winloadPath,
+            request.Reboot);
+
         foreach (var command in remainingCommands)
         {
             var result = await processExecutor.ExecuteAsync(command.FileName, command.Arguments, cancellationToken);
@@ -251,7 +462,10 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
             var updatedManifest = manifest with
             {
                 BootEntryId = bootEntryId,
-                LastPivotedUtc = DateTimeOffset.UtcNow
+                LastPivotedUtc = DateTimeOffset.UtcNow,
+                SystemPartition = systemPartition,
+                BootSdiPath = bootSdiPath,
+                WinloadPath = winloadPath
             };
 
             var updatedManifestJson = JsonSerializer.Serialize(updatedManifest, JsonOptions);
@@ -363,6 +577,15 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
         }
     }
 
+    private static BootPivotStageResult BuildStageValidationFailure(string message)
+    {
+        return new BootPivotStageResult(
+            BootPivotStatus.ValidationError,
+            message,
+            null,
+            Array.Empty<string>());
+    }
+
     private static BootPivotPivotResult BuildCommandFailure(
         string message,
         ProcessExecutionResult result,
@@ -409,6 +632,9 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
         string label,
         string ramdiskDevice,
         string bootEntryId,
+        string systemPartition,
+        string bootSdiPath,
+        string winloadPath,
         bool reboot)
     {
         var commands = new List<CommandSpec>
@@ -416,27 +642,32 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
             new("bcdedit", ["/create", "/d", label, "/application", "osloader"])
         };
 
-        commands.AddRange(BuildPivotCommandSpecs(bootEntryId, ramdiskDevice, reboot));
+        commands.AddRange(BuildPivotCommandSpecs(
+            bootEntryId,
+            ramdiskDevice,
+            systemPartition,
+            bootSdiPath,
+            winloadPath,
+            reboot));
+
         return commands.Select(FormatCommand).ToArray();
     }
 
     private static IReadOnlyList<CommandSpec> BuildPivotCommandSpecs(
         string bootEntryId,
         string ramdiskDevice,
+        string systemPartition,
+        string bootSdiPath,
+        string winloadPath,
         bool reboot)
     {
-        var systemDrive = Environment.GetEnvironmentVariable("SystemDrive");
-        if (string.IsNullOrWhiteSpace(systemDrive))
-        {
-            systemDrive = "C:";
-        }
-
         var commands = new List<CommandSpec>
         {
-            new("bcdedit", ["/set", "{ramdiskoptions}", "ramdisksdidevice", $"partition={systemDrive}"]),
-            new("bcdedit", ["/set", "{ramdiskoptions}", "ramdisksdipath", "\\boot\\boot.sdi"]),
+            new("bcdedit", ["/set", "{ramdiskoptions}", "ramdisksdidevice", $"partition={systemPartition}"]),
+            new("bcdedit", ["/set", "{ramdiskoptions}", "ramdisksdipath", bootSdiPath]),
             new("bcdedit", ["/set", bootEntryId, "device", ramdiskDevice]),
             new("bcdedit", ["/set", bootEntryId, "osdevice", ramdiskDevice]),
+            new("bcdedit", ["/set", bootEntryId, "path", winloadPath]),
             new("bcdedit", ["/set", bootEntryId, "systemroot", "\\Windows"]),
             new("bcdedit", ["/set", bootEntryId, "winpe", "yes"]),
             new("bcdedit", ["/set", bootEntryId, "detecthal", "yes"]),
@@ -483,6 +714,238 @@ public sealed class WindowsBootPivotDriver : IBootPivotDriver
 
         ramdiskDevice = $"ramdisk=[{drive}]{relativePath},{{ramdiskoptions}}";
         return true;
+    }
+
+    private async Task<string> ResolveRecommendedWinloadPathAsync(CancellationToken cancellationToken)
+    {
+        var detectedPath = await TryReadCurrentWinloadPathAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(detectedPath))
+        {
+            return detectedPath;
+        }
+
+        return ResolveFallbackWinloadPath();
+    }
+
+    private async Task<string> ResolveWinloadPathAsync(string? requestedPath, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(requestedPath))
+        {
+            return requestedPath;
+        }
+
+        return await ResolveRecommendedWinloadPathAsync(cancellationToken);
+    }
+
+    private async Task<string?> TryReadCurrentWinloadPathAsync(CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows() || !IsExecutableAvailable("bcdedit.exe"))
+        {
+            return null;
+        }
+
+        var command = new CommandSpec("bcdedit", ["/enum", "{current}"]);
+        var result = await processExecutor.ExecuteAsync(command.FileName, command.Arguments, cancellationToken);
+
+        if (result.ExitCode != 0)
+        {
+            return null;
+        }
+
+        var path = BcdCurrentPathParser.Parse(result.StandardOutput);
+        return NormalizeWinloadPath(path);
+    }
+
+    private static string ResolveFallbackWinloadPath()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return DefaultWinloadEfiPath;
+        }
+
+        var windowsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (string.IsNullOrWhiteSpace(windowsDirectory))
+        {
+            return DefaultWinloadEfiPath;
+        }
+
+        var efiCandidate = Path.Combine(windowsDirectory, "System32", "winload.efi");
+        if (File.Exists(efiCandidate))
+        {
+            return DefaultWinloadEfiPath;
+        }
+
+        var exeCandidate = Path.Combine(windowsDirectory, "System32", "winload.exe");
+        if (File.Exists(exeCandidate))
+        {
+            return DefaultWinloadExePath;
+        }
+
+        return DefaultWinloadEfiPath;
+    }
+
+    private static bool TryResolveSystemPartition(string? requested, out string systemPartition, out string error)
+    {
+        var candidate = requested;
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            candidate = Environment.GetEnvironmentVariable("SystemDrive");
+        }
+
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            candidate = "C:";
+        }
+
+        var normalized = candidate.Trim().Replace('/', '\\').TrimEnd('\\');
+        if (normalized.Length == 2 && char.IsLetter(normalized[0]) && normalized[1] == ':')
+        {
+            systemPartition = string.Create(2, normalized, static (buffer, value) =>
+            {
+                buffer[0] = char.ToUpperInvariant(value[0]);
+                buffer[1] = ':';
+            });
+
+            error = string.Empty;
+            return true;
+        }
+
+        systemPartition = string.Empty;
+        error = $"System partition '{candidate}' is invalid. Expected a drive designator like C:.";
+        return false;
+    }
+
+    private static string ResolveSystemPartition(string? requested)
+    {
+        return TryResolveSystemPartition(requested, out var systemPartition, out _)
+            ? systemPartition
+            : "C:";
+    }
+
+    private static bool TryResolveBootSdiPath(
+        string? requestedPath,
+        string systemPartition,
+        out string bootSdiPath,
+        out string bootSdiFullPath,
+        out string error)
+    {
+        var candidate = string.IsNullOrWhiteSpace(requestedPath)
+            ? DefaultBootSdiPath
+            : requestedPath.Trim();
+
+        candidate = candidate.Replace('/', '\\');
+
+        if (TrySplitDriveAbsolutePath(candidate, out var drive, out var relativePathFromDrive))
+        {
+            if (!string.Equals(drive, systemPartition, StringComparison.OrdinalIgnoreCase))
+            {
+                bootSdiPath = string.Empty;
+                bootSdiFullPath = string.Empty;
+                error = $"boot.sdi path drive '{drive}' does not match system partition '{systemPartition}'.";
+                return false;
+            }
+
+            bootSdiPath = NormalizeRootedPath(relativePathFromDrive);
+        }
+        else
+        {
+            bootSdiPath = NormalizeRootedPath(candidate);
+        }
+
+        if (string.IsNullOrWhiteSpace(bootSdiPath) || bootSdiPath == "\\")
+        {
+            bootSdiPath = string.Empty;
+            bootSdiFullPath = string.Empty;
+            error = "boot.sdi path is invalid.";
+            return false;
+        }
+
+        if (bootSdiPath.Contains(':', StringComparison.Ordinal))
+        {
+            bootSdiPath = string.Empty;
+            bootSdiFullPath = string.Empty;
+            error = "boot.sdi path must be root-relative (for example \\boot\\boot.sdi).";
+            return false;
+        }
+
+        bootSdiFullPath = BuildAbsolutePath(systemPartition, bootSdiPath);
+        error = string.Empty;
+        return true;
+    }
+
+    private static string NormalizeRootedPath(string value)
+    {
+        var normalized = value.Replace('/', '\\').Trim();
+        normalized = normalized.TrimStart('\\');
+        return string.IsNullOrWhiteSpace(normalized)
+            ? string.Empty
+            : $"\\{normalized}";
+    }
+
+    private static string? NormalizeWinloadPath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var candidate = value.Trim().Replace('/', '\\');
+        if (TrySplitDriveAbsolutePath(candidate, out _, out var relativePathFromDrive))
+        {
+            candidate = relativePathFromDrive;
+        }
+
+        return NormalizeRootedPath(candidate);
+    }
+
+    private static bool TryResolveRequestedWinloadPath(
+        string? requestedPath,
+        out string? normalizedPath,
+        out string error)
+    {
+        normalizedPath = null;
+        error = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(requestedPath))
+        {
+            return true;
+        }
+
+        var normalized = NormalizeWinloadPath(requestedPath);
+        if (string.IsNullOrWhiteSpace(normalized) || normalized == "\\" || normalized.Contains(':', StringComparison.Ordinal))
+        {
+            error = "Winload path is invalid. Expected a rooted path like \\Windows\\System32\\winload.efi.";
+            return false;
+        }
+
+        normalizedPath = normalized;
+        return true;
+    }
+
+    private static bool TrySplitDriveAbsolutePath(string path, out string drive, out string relativePath)
+    {
+        if (path.Length >= 3
+            && char.IsLetter(path[0])
+            && path[1] == ':'
+            && (path[2] == '\\' || path[2] == '/'))
+        {
+            drive = string.Create(2, path, static (buffer, value) =>
+            {
+                buffer[0] = char.ToUpperInvariant(value[0]);
+                buffer[1] = ':';
+            });
+            relativePath = path[2..];
+            return true;
+        }
+
+        drive = string.Empty;
+        relativePath = string.Empty;
+        return false;
+    }
+
+    private static string BuildAbsolutePath(string systemPartition, string rootedPath)
+    {
+        return $"{systemPartition}\\{rootedPath.TrimStart('\\')}";
     }
 
     private static string FormatCommand(CommandSpec command)
