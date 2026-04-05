@@ -45,4 +45,3 @@ dotnet test BootPivot.slnx -c Release
 ## Safety Defaults
 
 - `pivot` runs in preview mode unless `--apply` is explicitly provided.
-- Loader template keeps `<some_var>` placeholder unless a command override is supplied.

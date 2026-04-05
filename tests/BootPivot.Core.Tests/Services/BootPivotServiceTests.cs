@@ -55,7 +55,7 @@ public sealed class BootPivotServiceTests
         Assert.Equal(3, capturedRequest.ImageIndex);
         Assert.Equal("BootPivot Demo", capturedRequest.Label);
         Assert.True(Path.IsPathRooted(capturedRequest.ImagePath));
-        Assert.Contains("<some_var>", capturedRequest.LoaderScriptContent);
+        Assert.DoesNotContain("<some_var>", capturedRequest.LoaderScriptContent);
 
         driver.VerifyAll();
     }

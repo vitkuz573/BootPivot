@@ -44,7 +44,7 @@ public sealed class StageCommand
         };
         var loaderCommandOption = new Option<string?>("--loader-command")
         {
-            Description = "Command that replaces <some_var> in loader template."
+            Description = "Optional command injected into the loader script."
         };
         var dryRunOption = new Option<bool>("--dry-run")
         {

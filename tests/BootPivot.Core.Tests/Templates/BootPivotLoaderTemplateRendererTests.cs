@@ -20,7 +20,7 @@ public sealed class BootPivotLoaderTemplateRendererTests
     }
 
     [Fact]
-    public void Render_LeavesSomeVarPlaceholder_WhenLoaderCommandMissing()
+    public void Render_ReplacesSomeVarWithEmpty_WhenLoaderCommandMissing()
     {
         const string template = "cmd=<some_var>";
 
@@ -31,6 +31,6 @@ public sealed class BootPivotLoaderTemplateRendererTests
             "Pivot Label",
             null);
 
-        Assert.Equal("cmd=<some_var>", rendered);
+        Assert.Equal("cmd=", rendered);
     }
 }

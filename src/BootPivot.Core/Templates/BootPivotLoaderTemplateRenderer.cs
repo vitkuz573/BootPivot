@@ -20,10 +20,8 @@ public static class BootPivotLoaderTemplateRenderer
             .Replace("<image_index>", imageIndex.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
             .Replace("<boot_label>", bootLabel, StringComparison.Ordinal);
 
-        if (!string.IsNullOrWhiteSpace(loaderCommand))
-        {
-            rendered = rendered.Replace("<some_var>", loaderCommand.Trim(), StringComparison.Ordinal);
-        }
+        var resolvedLoaderCommand = loaderCommand?.Trim() ?? string.Empty;
+        rendered = rendered.Replace("<some_var>", resolvedLoaderCommand, StringComparison.Ordinal);
 
         return rendered;
     }
